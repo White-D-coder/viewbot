@@ -24,9 +24,9 @@ function App() {
 
             // List of proxies to try in order
             const proxies = [
+                (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, // New Primary
                 (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-                (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-                (url) => `https://thingproxy.freeboard.io/fetch/${url}` // Backup 3
+                (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
             ]
 
             let html = ''
