@@ -25,7 +25,8 @@ function App() {
             // List of proxies to try in order
             const proxies = [
                 (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-                (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` // Use raw for direct HTML
+                (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+                (url) => `https://thingproxy.freeboard.io/fetch/${url}` // Backup 3
             ]
 
             let html = ''
