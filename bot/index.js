@@ -6,13 +6,53 @@ import fs from 'fs';
 puppeteer.use(StealthPlugin());
 
 const TARGET_URL = process.argv[2];
-const CONCURRENCY = 5; // How many browsers at once
+const CONCURRENCY = 10; // Max concurrent browsers
 const VIEW_DURATION = [60000, 180000]; // 1 min to 3 min
 
 if (!TARGET_URL) {
     console.error(chalk.red('Please provide a YouTube URL.'));
-    console.log(chalk.gray('Usage: node index.js <URL>'));
+    console.log(chalk.gray('Usage: node index.js <VIDEO_URL_OR_CHANNEL_URL>'));
     process.exit(1);
+}
+
+// Global Video Pool
+let videoPool = [];
+
+// Helper: Check if URL is channel
+function isChannelUrl(url) {
+    return url.includes('/channel/') || url.includes('/c/') || url.includes('/@') || url.includes('/user/');
+}
+
+// Helper: Scrape videos from channel
+async function scrapeChannelVideos(url) {
+    console.log(chalk.yellow(`Detecting Channel URL. Scraping videos from: ${url}`));
+    const browser = await puppeteer.launch({ headless: "new" });
+    const page = await browser.newPage();
+
+    try {
+        let videosUrl = url;
+        if (!url.includes('/videos')) {
+            videosUrl = url.replace(/\/$/, '') + '/videos';
+        }
+
+        await page.goto(videosUrl, { waitUntil: 'networkidle2' });
+
+        // Extract video IDs
+        const links = await page.evaluate(() => {
+            const anchors = Array.from(document.querySelectorAll('a#video-title-link'));
+            return anchors.map(a => a.href).filter(href => href.includes('/watch?v='));
+        });
+
+        const uniqueLinks = [...new Set(links)];
+        console.log(chalk.green(`Found ${uniqueLinks.length} videos.`));
+        return uniqueLinks;
+
+    } catch (e) {
+        console.error(chalk.red('Failed to scrape channel:', e.message));
+        return [];
+    } finally {
+        await browser.close();
+    }
 }
 
 // Load Proxies
@@ -24,45 +64,33 @@ try {
         .filter(l => l && !l.startsWith('#'));
 } catch (e) {
     console.error(chalk.red('Could not read proxies.txt'));
-    console.log(chalk.yellow('Creating empty proxies.txt...'));
-    fs.writeFileSync('proxies.txt', '# Add proxies here (ip:port:user:pass)\n');
+    process.exit(1);
 }
 
 if (proxies.length === 0) {
-    console.warn(chalk.yellow('WARNING: No proxies found in proxies.txt. Running with YOUR IP (Views might not count).'));
-    proxies.push(null); // Add one direct connection
+    console.warn(chalk.yellow('WARNING: No proxies found. Using direct connection (risky).'));
+    proxies.push(null);
 }
 
-console.log(chalk.green(`Starting ViewBot for: ${TARGET_URL}`));
-console.log(chalk.blue(`Loaded ${proxies.length} proxies/identities.`));
-
-async function runBrowser(proxy, id) {
+async function runBrowser(proxy, id, targetVideo) {
     const log = (msg) => console.log(chalk.magenta(`[Bot ${id}]`) + ' ' + msg);
 
     let launchArgs = [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--window-size=1280,720',
-        '--mute-audio', // Mute to identify as "background" less easily? Actually unmuting is better but annoying.
-        '--autoplay-policy=no-user-gesture-required'
+        '--mute-audio',
+        '--autoplay-policy=no-user-gesture-required',
+        '--ignore-certificate-errors',
+        '--ignore-certificate-errors-spki-list'
     ];
 
-    let proxyUrl = null;
-    let username = null;
-    let password = null;
+    let username, password;
 
     if (proxy) {
-        // Parse Proxy
-        // Formats: 
-        // 1. ip:port
-        // 2. http://user:pass@ip:port
-        // 3. ip:port:user:pass
-
         if (proxy.includes('@')) {
-            // Standard URL format
             launchArgs.push(`--proxy-server=${proxy}`);
         } else if (proxy.split(':').length === 4) {
-            // ip:port:user:pass
             const parts = proxy.split(':');
             launchArgs.push(`--proxy-server=${parts[0]}:${parts[1]}`);
             username = parts[2];
@@ -72,56 +100,50 @@ async function runBrowser(proxy, id) {
         }
     }
 
-    log(`Launching... ${proxy ? 'Ref: Proxy' : 'Ref: Direct'}`);
+    // Determine target
+    let finalUrl = targetVideo;
+    // If pool exists, pick random if not provided (re-roll logic could go here)
+    if (videoPool.length > 0) {
+        finalUrl = videoPool[Math.floor(Math.random() * videoPool.length)];
+    }
+
+    log(`Target: ${finalUrl.substring(finalUrl.length - 11)} | Proxy: ${proxy ? 'YES' : 'NO'}`);
 
     let browser = null;
     try {
         browser = await puppeteer.launch({
-            headless: "new", // "new" is faster, but false is visible for debugging
+            headless: "new",
+            ignoreHTTPSErrors: true,
             args: launchArgs
         });
 
         const page = await browser.newPage();
 
-        // Stealth/Anonymity improvements
+        // Stealth
         await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => false,
-            });
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
         });
 
-        if (username && password) {
-            await page.authenticate({ username, password });
-        }
+        if (username && password) await page.authenticate({ username, password });
 
-        // Optimization: Block images/fonts to save bandwidth
+        // Optimization
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            const type = req.resourceType();
-            if (['image', 'font', 'stylesheet'].includes(type)) {
-                req.abort();
-            } else {
-                req.continue();
-            }
+            if (['image', 'font'].includes(req.resourceType())) req.abort();
+            else req.continue();
         });
 
-        log('Navigating to YouTube...');
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-        // Try to click play if needed, or unmute
-        log('Watching...');
-
-        // Random duration
+        // Playback logic
         const duration = Math.floor(Math.random() * (VIEW_DURATION[1] - VIEW_DURATION[0])) + VIEW_DURATION[0];
-        log(`Staying for ${duration / 1000}s`);
+        log(`Watching for ${Math.floor(duration / 1000)}s...`);
 
-        // Simulate mouse movement
-        await page.mouse.move(100, 100);
-        await page.mouse.move(200, 200);
+        // Simulate activity
+        setTimeout(() => page.mouse.move(200, 200).catch(() => { }), 5000);
 
         await new Promise(r => setTimeout(r, duration));
-
-        log('Finished.');
+        log('View Complete.');
 
     } catch (e) {
         log(chalk.red(`Error: ${e.message}`));
@@ -130,8 +152,21 @@ async function runBrowser(proxy, id) {
     }
 }
 
-// Queue system
 async function startQueue() {
+    // 1. Prepare Video Pool
+    if (isChannelUrl(TARGET_URL)) {
+        videoPool = await scrapeChannelVideos(TARGET_URL);
+        if (videoPool.length === 0) {
+            console.error(chalk.red('No videos found in channel. Exiting.'));
+            process.exit(1);
+        }
+    } else {
+        videoPool = [TARGET_URL];
+    }
+
+    console.log(chalk.blue(`Starting Swarm with ${proxies.length} proxies across ${videoPool.length} videos.`));
+
+    // 2. Start Workers
     let active = 0;
     let index = 0;
 
@@ -143,12 +178,16 @@ async function startQueue() {
             const i = index;
             index++;
             active++;
-            runBrowser(p, i + 1).then(() => {
+
+            // Pick random video for this bot instance
+            const randomVideo = videoPool[Math.floor(Math.random() * videoPool.length)];
+
+            runBrowser(p, i + 1, randomVideo).then(() => {
                 active--;
                 if (index < proxies.length) next();
                 else if (active === 0) console.log(chalk.green('All bots finished.'));
             });
-            next(); // Try to spawn more if we have concurrency slots
+            next();
         }
     };
 
