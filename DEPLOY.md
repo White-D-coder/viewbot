@@ -37,3 +37,16 @@ If you want the site to update automatically when you save code:
 ## post-deployment Note
 **Important:** Your browser might block "Autoplay" on the hosted site because it is a new domain.
 -   You may need to click the "Lock/Permissions" icon in your URL bar and allow **Audio/Sound** or **Autoplay** for the site to function perfectly.
+
+## Why Views Might Not Count
+If you notice that the "views" on the YouTube video are not increasing despite running this bot, it is likely due to YouTube's fraud detection systems:
+
+1.  **Duplicate IP Address**: YouTube ignores multiple views coming from the same IP address within a short time. Running 30 instances on one machine appears as 1 IP.
+2.  **Autoplay & Muted**: Use of `autoplay` and `muted` players (required for this wall of videos) is often discounted by YouTube as "passive" or "low value" traffic.
+3.  **Browser Throttling**: Processors (Chrome/Edge/Safari) will stop rendering iframes that are not "visible" or focused to save battery. This signals to YouTube that the user isn't actually watching.
+4.  **Bot Detection**: YouTube can detect that the playback is embedded in a specific way and may flag it as non-human traffic.
+
+**Mitigation Tips:**
+-   **Use Proxies**: If you really need to simulate distinct users, each iframe would need to be routed through a different proxy (technically difficult with simple iframes).
+-   **Interact**: Unmute occasionally or play manually.
+-   **Spread Out**: Run the site on multiple devices (phones, laptops) on different networks (WiFi vs Data).
