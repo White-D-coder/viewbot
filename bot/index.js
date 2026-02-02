@@ -105,31 +105,33 @@ async function runBrowser(proxy, id, targetVideo) {
     const log = (msg) => console.log(chalk.magenta(`[Bot ${id}]`) + ' ' + msg);
 
     // Retry wrapper
-    const MAX_RETRIES = 3;
+    const MAX_RETRIES = 50; // Try up to 50 different proxies
     let attempt = 0;
-    let currentProxy = proxy; // Start with the proxy passed to the function
+    let currentProxy = proxy;
+    let useDirect = false;
 
     while (attempt < MAX_RETRIES) {
         attempt++;
 
         // Pick new proxy if retrying
         if (attempt > 1) {
-            // Remove the previously failed proxy from the list if it's not null
+            // Remove the previously failed proxy from the list
             if (currentProxy !== null && proxies.includes(currentProxy)) {
                 const indexToRemove = proxies.indexOf(currentProxy);
                 if (indexToRemove > -1) {
                     proxies.splice(indexToRemove, 1);
-                    log(chalk.yellow(`Removed failed proxy: ${currentProxy}`));
                 }
             }
 
             // Pick a new random proxy from the remaining pool
             if (proxies.length > 0) {
                 currentProxy = proxies[Math.floor(Math.random() * proxies.length)];
-                log(chalk.yellow(`Retry ${attempt}/${MAX_RETRIES} with new proxy...`));
+                log(chalk.yellow(`Retry ${attempt}/${MAX_RETRIES} with new proxy (${proxies.length} left)...`));
             } else {
-                currentProxy = null; // No more proxies left
-                log(chalk.yellow(`Retry ${attempt}/${MAX_RETRIES} with direct connection (no proxies left)...`));
+                // No proxies left, fallback to direct
+                currentProxy = null;
+                useDirect = true;
+                log(chalk.red(`No proxies left. Falling back to DIRECT connection.`));
             }
         }
 
@@ -160,12 +162,11 @@ async function runBrowser(proxy, id, targetVideo) {
 
         // Determine target
         let finalUrl = targetVideo;
-        // If pool exists, pick random if not provided (re-roll logic could go here)
         if (videoPool.length > 0) {
             finalUrl = videoPool[Math.floor(Math.random() * videoPool.length)];
         }
 
-        log(`Target: ${finalUrl.substring(finalUrl.length - 11)} | Proxy: ${currentProxy ? 'YES' : 'NO'}`);
+        log(`Target: ${finalUrl.substring(finalUrl.length - 11)} | Proxy: ${currentProxy ? 'YES' : 'DIRECT'}`);
 
         let browser = null;
         try {
@@ -191,13 +192,12 @@ async function runBrowser(proxy, id, targetVideo) {
                 else req.continue();
             });
 
-            await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 30000 }); // 30s timeout
+            await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 45000 }); // Increased timeout for slow proxies
 
             // Playback logic
             const duration = Math.floor(Math.random() * (VIEW_DURATION[1] - VIEW_DURATION[0])) + VIEW_DURATION[0];
             log(`Watching for ${Math.floor(duration / 1000)}s...`);
 
-            // Simulate activity
             setTimeout(() => page.mouse.move(200, 200).catch(() => { }), 5000);
 
             await new Promise(r => setTimeout(r, duration));
@@ -207,12 +207,14 @@ async function runBrowser(proxy, id, targetVideo) {
             return; // Success, exit retry loop
 
         } catch (e) {
-            log(chalk.red(`Error: ${e.message}`));
+            const isTimeout = e.message.includes('timeout') || e.message.includes('timed out');
+            log(chalk.red(`Error: ${isTimeout ? 'Connection Timeout' : e.message}`));
             if (browser) await browser.close();
-            // Continue to next attempt loop
+
+            if (useDirect) return; // If direct failed, stop retrying for this bot slot
         }
     }
-    log(chalk.red('Failed after max retries.'));
+    log(chalk.red('Bot stopped - Max retries exceeded.'));
 }
 
 async function startQueue() {
