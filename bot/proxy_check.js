@@ -3,10 +3,10 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import axios from 'axios';
 import chalk from 'chalk';
 
-const INPUT_FILE = 'proxies.txt';
-const OUTPUT_FILE = 'proxies_active.txt';
-const TEST_URL = 'https://www.google.com'; // Fast, reliable
-const TIMEOUT = 5000; // 5s timeout
+const INPUT_FILE = 'all_proxies.txt';
+const OUTPUT_FILE = 'proxies.txt'; // Write directly to active file
+const TEST_URL = 'https://www.google.com';
+const TIMEOUT = 10000; // 10s timeout
 const CONCURRENCY = 20;
 
 async function checkProxy(proxy) {
