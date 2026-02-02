@@ -6,8 +6,8 @@ import fs from 'fs';
 puppeteer.use(StealthPlugin());
 
 const TARGET_URL = process.argv[2];
-const CONCURRENCY = 10; // Max concurrent browsers
-const VIEW_DURATION = [60000, 180000]; // 1 min to 3 min
+const CONCURRENCY = config.concurrency;
+const VIEW_DURATION = config.viewDuration;
 
 if (!TARGET_URL) {
     console.error(chalk.red('Please provide a YouTube URL.'));
@@ -153,25 +153,30 @@ async function runBrowser(proxy, id, targetVideo) {
                 currentProxy = proxies[Math.floor(Math.random() * proxies.length)];
                 log(chalk.yellow(`Retry ${attempt}/${MAX_RETRIES} with new proxy (${proxies.length} left)...`));
             } else {
-                // No proxies left, fallback to direct
-                currentProxy = null;
-                useDirect = true;
-                log(chalk.red(`No proxies left. Falling back to DIRECT connection.`));
+                // No proxies left
+                if (config.allowDirectFallback) {
+                    currentProxy = null;
+                    useDirect = true;
+                    log(chalk.red(`No proxies left. Falling back to DIRECT connection (RISKY).`));
+                } else {
+                    log(chalk.red(`No proxies left & Direct Fallback disabled. Bot sleeping.`));
+                    return; // Stop this bot instance safely
+                }
             }
         }
 
         let launchArgs = [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--window-size=800,600', // Smaller window
-            '--mute-audio',
+            `--window-size=${config.windowSize[0]},${config.windowSize[1]}`,
+            config.muteAudio ? '--mute-audio' : '',
             '--autoplay-policy=no-user-gesture-required',
             '--ignore-certificate-errors',
             '--ignore-certificate-errors-spki-list',
             '--disable-accelerated-2d-canvas',
             '--disable-gpu', // Save GPU resources
             '--disable-dev-shm-usage'
-        ];
+        ].filter(Boolean);
 
         let username, password;
 
@@ -222,13 +227,42 @@ async function runBrowser(proxy, id, targetVideo) {
 
             await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 45000 }); // Increased timeout for slow proxies
 
+            // Human Behavior Simulation
+            const simulateHuman = async () => {
+                // 1. Random Mouse Movements
+                try {
+                    for (let i = 0; i < 5; i++) {
+                        await page.mouse.move(
+                            Math.random() * config.windowSize[0],
+                            Math.random() * config.windowSize[1]
+                        );
+                        await new Promise(r => setTimeout(r, Math.random() * 2000));
+                    }
+                } catch (e) { }
+
+                // 2. Random Scrolling (Simulate reading comments)
+                try {
+                    await page.evaluate(() => {
+                        window.scrollBy(0, 500);
+                        setTimeout(() => window.scrollBy(0, -200), 1000);
+                    });
+                } catch (e) { }
+
+                // 3. Hover over video (Keep player functional)
+                try {
+                    await page.hover('#movie_player');
+                } catch (e) { }
+            };
+
+            // Run simulation periodically
+            const humanInterval = setInterval(simulateHuman, 10000);
+
             // Playback logic
             const duration = Math.floor(Math.random() * (VIEW_DURATION[1] - VIEW_DURATION[0])) + VIEW_DURATION[0];
             log(`Watching for ${Math.floor(duration / 1000)}s...`);
 
-            setTimeout(() => page.mouse.move(200, 200).catch(() => { }), 5000);
-
             await new Promise(r => setTimeout(r, duration));
+            clearInterval(humanInterval);
             log('View Complete.');
 
             if (browser) await browser.close();
