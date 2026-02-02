@@ -32,6 +32,27 @@ async function scrapeChannelVideos(url) {
     });
     const page = await browser.newPage();
 
+    // Auto-scroll helper
+    const autoScroll = async (page) => {
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                let totalHeight = 0;
+                const distance = 100;
+                const timer = setInterval(() => {
+                    const scrollHeight = document.documentElement.scrollHeight;
+                    window.scrollBy(0, distance);
+                    totalHeight += distance;
+
+                    // Scroll for max 10 seconds or until bottom
+                    if (totalHeight >= 20000) {
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 50);
+            });
+        });
+    };
+
     try {
         // 1. Scrape /videos
         let videosUrl = url.replace(/\/$/, '');
@@ -43,20 +64,24 @@ async function scrapeChannelVideos(url) {
 
         // Try scraping regular videos
         try {
-            console.log(chalk.blue('Checking /videos tab...'));
+            console.log(chalk.blue('Checking /videos tab (scrolling)...'));
             await page.goto(videosUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            await autoScroll(page); // Scroll to load more
+
             const videoLinks = await page.evaluate(() => {
                 const anchors = Array.from(document.querySelectorAll('a#video-title-link, a#video-title'));
                 return anchors.map(a => a.href).filter(href => href.includes('/watch?v='));
             });
             allLinks.push(...videoLinks);
-        } catch (e) { console.log(chalk.gray('No regular videos found or timeout.')); }
+        } catch (e) { console.log(chalk.gray('No regular videos/timeout.')); }
 
         // 2. Scrape /shorts
         try {
-            console.log(chalk.blue('Checking /shorts tab...'));
+            console.log(chalk.blue('Checking /shorts tab (scrolling)...'));
             const shortsUrl = url.replace(/\/$/, '').replace(/\/videos$/, '') + '/shorts';
             await page.goto(shortsUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            await autoScroll(page); // Scroll to load more
+
             const shortsLinks = await page.evaluate(() => {
                 const anchors = Array.from(document.querySelectorAll('a[href*="/shorts/"]'));
                 return anchors.map(a => a.href);
@@ -70,7 +95,7 @@ async function scrapeChannelVideos(url) {
                 return link;
             });
             allLinks.push(...normalizedShorts);
-        } catch (e) { console.log(chalk.gray('No shorts found or timeout.')); }
+        } catch (e) { console.log(chalk.gray('No shorts/timeout.')); }
 
         const uniqueLinks = [...new Set(allLinks)];
         console.log(chalk.green(`Found ${uniqueLinks.length} videos/shorts total.`));
@@ -138,11 +163,14 @@ async function runBrowser(proxy, id, targetVideo) {
         let launchArgs = [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--window-size=1280,720',
+            '--window-size=800,600', // Smaller window
             '--mute-audio',
             '--autoplay-policy=no-user-gesture-required',
             '--ignore-certificate-errors',
-            '--ignore-certificate-errors-spki-list'
+            '--ignore-certificate-errors-spki-list',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu', // Save GPU resources
+            '--disable-dev-shm-usage'
         ];
 
         let username, password;
@@ -207,11 +235,13 @@ async function runBrowser(proxy, id, targetVideo) {
             return; // Success, exit retry loop
 
         } catch (e) {
-            const isTimeout = e.message.includes('timeout') || e.message.includes('timed out');
-            log(chalk.red(`Error: ${isTimeout ? 'Connection Timeout' : e.message}`));
+            // Suppress verbose errors to clean up terminal
+            // const isTimeout = e.message.includes('timeout') || e.message.includes('timed out');
+            // log(chalk.red(`Error: ${isTimeout ? 'Connection Timeout' : e.message}`));
+
             if (browser) await browser.close();
 
-            if (useDirect) return; // If direct failed, stop retrying for this bot slot
+            if (useDirect) return;
         }
     }
     log(chalk.red('Bot stopped - Max retries exceeded.'));
@@ -229,34 +259,37 @@ async function startQueue() {
         videoPool = [TARGET_URL];
     }
 
-    console.log(chalk.blue(`Starting Swarm with ${proxies.length} proxies across ${videoPool.length} videos.`));
+    console.log(chalk.blue(`Starting INFINITE Swarm with ${proxies.length} proxies across ${videoPool.length} videos.`));
+    console.log(chalk.yellow('Press Ctrl+C to stop.'));
 
-    // 2. Start Workers
+    // 2. Start Infinite Workers
     let active = 0;
-    let index = 0;
+    let botIdCounter = 1;
 
-    const next = () => {
-        if (index >= proxies.length) return;
-
+    const spawn = () => {
         if (active < CONCURRENCY) {
-            const p = proxies[index];
-            const i = index;
-            index++;
             active++;
+            const id = botIdCounter++;
 
-            // Pick random video for this bot instance
+            // Pick random proxy (or null if none)
+            let p = null;
+            if (proxies.length > 0) {
+                p = proxies[Math.floor(Math.random() * proxies.length)];
+            }
+
+            // Pick random video
             const randomVideo = videoPool[Math.floor(Math.random() * videoPool.length)];
 
-            runBrowser(p, i + 1, randomVideo).then(() => {
+            runBrowser(p, id, randomVideo).then(() => {
                 active--;
-                if (index < proxies.length) next();
-                else if (active === 0) console.log(chalk.green('All bots finished.'));
+                spawn(); // Respawn immediately when done
             });
-            next();
+
+            spawn(); // Recursively fill concurrency slots
         }
     };
 
-    next();
+    spawn();
 }
 
 startQueue();
