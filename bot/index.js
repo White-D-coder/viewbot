@@ -26,25 +26,54 @@ function isChannelUrl(url) {
 // Helper: Scrape videos from channel
 async function scrapeChannelVideos(url) {
     console.log(chalk.yellow(`Detecting Channel URL. Scraping videos from: ${url}`));
-    const browser = await puppeteer.launch({ headless: "new" });
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
     const page = await browser.newPage();
 
     try {
-        let videosUrl = url;
-        if (!url.includes('/videos')) {
-            videosUrl = url.replace(/\/$/, '') + '/videos';
+        // 1. Scrape /videos
+        let videosUrl = url.replace(/\/$/, '');
+        if (!videosUrl.includes('/videos') && !videosUrl.includes('/shorts')) {
+            videosUrl += '/videos';
         }
 
-        await page.goto(videosUrl, { waitUntil: 'networkidle2' });
+        let allLinks = [];
 
-        // Extract video IDs
-        const links = await page.evaluate(() => {
-            const anchors = Array.from(document.querySelectorAll('a#video-title-link'));
-            return anchors.map(a => a.href).filter(href => href.includes('/watch?v='));
-        });
+        // Try scraping regular videos
+        try {
+            console.log(chalk.blue('Checking /videos tab...'));
+            await page.goto(videosUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            const videoLinks = await page.evaluate(() => {
+                const anchors = Array.from(document.querySelectorAll('a#video-title-link, a#video-title'));
+                return anchors.map(a => a.href).filter(href => href.includes('/watch?v='));
+            });
+            allLinks.push(...videoLinks);
+        } catch (e) { console.log(chalk.gray('No regular videos found or timeout.')); }
 
-        const uniqueLinks = [...new Set(links)];
-        console.log(chalk.green(`Found ${uniqueLinks.length} videos.`));
+        // 2. Scrape /shorts
+        try {
+            console.log(chalk.blue('Checking /shorts tab...'));
+            const shortsUrl = url.replace(/\/$/, '').replace(/\/videos$/, '') + '/shorts';
+            await page.goto(shortsUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            const shortsLinks = await page.evaluate(() => {
+                const anchors = Array.from(document.querySelectorAll('a[href*="/shorts/"]'));
+                return anchors.map(a => a.href);
+            });
+            // Convert /shorts/ID to /watch?v=ID for consistency
+            const normalizedShorts = shortsLinks.map(link => {
+                if (link.includes('/shorts/')) {
+                    const id = link.split('/shorts/')[1].split('?')[0];
+                    return `https://www.youtube.com/watch?v=${id}`;
+                }
+                return link;
+            });
+            allLinks.push(...normalizedShorts);
+        } catch (e) { console.log(chalk.gray('No shorts found or timeout.')); }
+
+        const uniqueLinks = [...new Set(allLinks)];
+        console.log(chalk.green(`Found ${uniqueLinks.length} videos/shorts total.`));
         return uniqueLinks;
 
     } catch (e) {
@@ -75,81 +104,115 @@ if (proxies.length === 0) {
 async function runBrowser(proxy, id, targetVideo) {
     const log = (msg) => console.log(chalk.magenta(`[Bot ${id}]`) + ' ' + msg);
 
-    let launchArgs = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--window-size=1280,720',
-        '--mute-audio',
-        '--autoplay-policy=no-user-gesture-required',
-        '--ignore-certificate-errors',
-        '--ignore-certificate-errors-spki-list'
-    ];
+    // Retry wrapper
+    const MAX_RETRIES = 3;
+    let attempt = 0;
+    let currentProxy = proxy; // Start with the proxy passed to the function
 
-    let username, password;
+    while (attempt < MAX_RETRIES) {
+        attempt++;
 
-    if (proxy) {
-        if (proxy.includes('@')) {
-            launchArgs.push(`--proxy-server=${proxy}`);
-        } else if (proxy.split(':').length === 4) {
-            const parts = proxy.split(':');
-            launchArgs.push(`--proxy-server=${parts[0]}:${parts[1]}`);
-            username = parts[2];
-            password = parts[3];
-        } else {
-            launchArgs.push(`--proxy-server=${proxy}`);
+        // Pick new proxy if retrying
+        if (attempt > 1) {
+            // Remove the previously failed proxy from the list if it's not null
+            if (currentProxy !== null && proxies.includes(currentProxy)) {
+                const indexToRemove = proxies.indexOf(currentProxy);
+                if (indexToRemove > -1) {
+                    proxies.splice(indexToRemove, 1);
+                    log(chalk.yellow(`Removed failed proxy: ${currentProxy}`));
+                }
+            }
+
+            // Pick a new random proxy from the remaining pool
+            if (proxies.length > 0) {
+                currentProxy = proxies[Math.floor(Math.random() * proxies.length)];
+                log(chalk.yellow(`Retry ${attempt}/${MAX_RETRIES} with new proxy...`));
+            } else {
+                currentProxy = null; // No more proxies left
+                log(chalk.yellow(`Retry ${attempt}/${MAX_RETRIES} with direct connection (no proxies left)...`));
+            }
+        }
+
+        let launchArgs = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--window-size=1280,720',
+            '--mute-audio',
+            '--autoplay-policy=no-user-gesture-required',
+            '--ignore-certificate-errors',
+            '--ignore-certificate-errors-spki-list'
+        ];
+
+        let username, password;
+
+        if (currentProxy) {
+            if (currentProxy.includes('@')) {
+                launchArgs.push(`--proxy-server=${currentProxy}`);
+            } else if (currentProxy.split(':').length === 4) {
+                const parts = currentProxy.split(':');
+                launchArgs.push(`--proxy-server=${parts[0]}:${parts[1]}`);
+                username = parts[2];
+                password = parts[3];
+            } else {
+                launchArgs.push(`--proxy-server=${currentProxy}`);
+            }
+        }
+
+        // Determine target
+        let finalUrl = targetVideo;
+        // If pool exists, pick random if not provided (re-roll logic could go here)
+        if (videoPool.length > 0) {
+            finalUrl = videoPool[Math.floor(Math.random() * videoPool.length)];
+        }
+
+        log(`Target: ${finalUrl.substring(finalUrl.length - 11)} | Proxy: ${currentProxy ? 'YES' : 'NO'}`);
+
+        let browser = null;
+        try {
+            browser = await puppeteer.launch({
+                headless: "new",
+                ignoreHTTPSErrors: true,
+                args: launchArgs
+            });
+
+            const page = await browser.newPage();
+
+            // Stealth
+            await page.evaluateOnNewDocument(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            });
+
+            if (username && password) await page.authenticate({ username, password });
+
+            // Optimization
+            await page.setRequestInterception(true);
+            page.on('request', (req) => {
+                if (['image', 'font'].includes(req.resourceType())) req.abort();
+                else req.continue();
+            });
+
+            await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 30000 }); // 30s timeout
+
+            // Playback logic
+            const duration = Math.floor(Math.random() * (VIEW_DURATION[1] - VIEW_DURATION[0])) + VIEW_DURATION[0];
+            log(`Watching for ${Math.floor(duration / 1000)}s...`);
+
+            // Simulate activity
+            setTimeout(() => page.mouse.move(200, 200).catch(() => { }), 5000);
+
+            await new Promise(r => setTimeout(r, duration));
+            log('View Complete.');
+
+            if (browser) await browser.close();
+            return; // Success, exit retry loop
+
+        } catch (e) {
+            log(chalk.red(`Error: ${e.message}`));
+            if (browser) await browser.close();
+            // Continue to next attempt loop
         }
     }
-
-    // Determine target
-    let finalUrl = targetVideo;
-    // If pool exists, pick random if not provided (re-roll logic could go here)
-    if (videoPool.length > 0) {
-        finalUrl = videoPool[Math.floor(Math.random() * videoPool.length)];
-    }
-
-    log(`Target: ${finalUrl.substring(finalUrl.length - 11)} | Proxy: ${proxy ? 'YES' : 'NO'}`);
-
-    let browser = null;
-    try {
-        browser = await puppeteer.launch({
-            headless: "new",
-            ignoreHTTPSErrors: true,
-            args: launchArgs
-        });
-
-        const page = await browser.newPage();
-
-        // Stealth
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        });
-
-        if (username && password) await page.authenticate({ username, password });
-
-        // Optimization
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            if (['image', 'font'].includes(req.resourceType())) req.abort();
-            else req.continue();
-        });
-
-        await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-        // Playback logic
-        const duration = Math.floor(Math.random() * (VIEW_DURATION[1] - VIEW_DURATION[0])) + VIEW_DURATION[0];
-        log(`Watching for ${Math.floor(duration / 1000)}s...`);
-
-        // Simulate activity
-        setTimeout(() => page.mouse.move(200, 200).catch(() => { }), 5000);
-
-        await new Promise(r => setTimeout(r, duration));
-        log('View Complete.');
-
-    } catch (e) {
-        log(chalk.red(`Error: ${e.message}`));
-    } finally {
-        if (browser) await browser.close();
-    }
+    log(chalk.red('Failed after max retries.'));
 }
 
 async function startQueue() {
