@@ -2,6 +2,7 @@ import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import chalk from 'chalk';
 import fs from 'fs';
+import config from './config.js';
 
 puppeteer.use(StealthPlugin());
 
@@ -174,11 +175,13 @@ async function runBrowser(proxy, id, targetVideo) {
             '--ignore-certificate-errors',
             '--ignore-certificate-errors-spki-list',
             '--disable-accelerated-2d-canvas',
-            '--disable-gpu', // Save GPU resources
-            '--disable-dev-shm-usage'
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            `--user-agent=${config.userAgents[Math.floor(Math.random() * config.userAgents.length)]}` // Random UA at launch
         ].filter(Boolean);
 
         let username, password;
+        // ... (Proxy Logic stays same) ... 
 
         if (currentProxy) {
             if (currentProxy.includes('@')) {
@@ -199,8 +202,6 @@ async function runBrowser(proxy, id, targetVideo) {
             finalUrl = videoPool[Math.floor(Math.random() * videoPool.length)];
         }
 
-        log(`Target: ${finalUrl.substring(finalUrl.length - 11)} | Proxy: ${currentProxy ? 'YES' : 'DIRECT'}`);
-
         let browser = null;
         try {
             browser = await puppeteer.launch({
@@ -210,6 +211,12 @@ async function runBrowser(proxy, id, targetVideo) {
             });
 
             const page = await browser.newPage();
+
+            // QUALITY: Set Random Referrer
+            const randomReferrer = config.referrers[Math.floor(Math.random() * config.referrers.length)];
+            await page.setExtraHTTPHeaders({
+                'referer': randomReferrer
+            });
 
             // Stealth
             await page.evaluateOnNewDocument(() => {
